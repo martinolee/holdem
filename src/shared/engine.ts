@@ -109,36 +109,6 @@ export function handName(score: number): string {
   }
 }
 
-/** Monte Carlo win rate against nOpp random hands (client-side helper only). */
-export function equity(hole: number[], board: number[], nOpp: number, iters: number): number {
-  const used = new Uint8Array(52);
-  for (const c of hole) used[c] = 1;
-  for (const c of board) used[c] = 1;
-  const deck: number[] = [];
-  for (let c = 0; c < 52; c++) if (!used[c]) deck.push(c);
-  const n = deck.length, need = 5 - board.length;
-  let wins = 0;
-  for (let it = 0; it < iters; it++) {
-    let top = 0;
-    const draw = () => {
-      const j = top + ((Math.random() * (n - top)) | 0);
-      const t = deck[top]; deck[top] = deck[j]; deck[j] = t;
-      return deck[top++];
-    };
-    const full = board.slice();
-    for (let k = 0; k < need; k++) full.push(draw());
-    const my = evaluate(hole.concat(full));
-    let ties = 0, lost = false;
-    for (let o = 0; o < nOpp; o++) {
-      const s = evaluate([draw(), draw()].concat(full));
-      if (s > my) { lost = true; break; }
-      if (s === my) ties++;
-    }
-    if (!lost) wins += 1 / (ties + 1);
-  }
-  return wins / iters;
-}
-
 /** Names are typed by anyone with the link: strip control/invisible characters, cap at 12. */
 export function cleanName(s: unknown): string {
   return String(s ?? '')

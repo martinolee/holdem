@@ -58,7 +58,7 @@ holdem/
 │  └─ index.html           # 화면 마크업과 스타일 (app.js는 빌드 결과물)
 └─ src/
    ├─ shared/
-   │  ├─ engine.ts         # 족보 판정, 승률 계산 (서버와 클라이언트가 함께 사용)
+   │  ├─ engine.ts         # 족보 판정 (서버와 클라이언트가 함께 사용)
    │  └─ protocol.ts       # WebSocket 메시지 형식, 프로토콜 버전
    ├─ server/
    │  ├─ worker.ts         # /ws/<코드> → 테이블 객체, 나머지 → 정적 파일

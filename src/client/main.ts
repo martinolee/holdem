@@ -1,4 +1,4 @@
-import { RL, rk, sk, evaluate, handName, equity, cleanName, fmt } from '../shared/engine';
+import { RL, rk, sk, evaluate, handName, cleanName, fmt } from '../shared/engine';
 import { PROTOCOL, NSEAT, type ClientMsg, type HandView, type ServerMsg, type TableView, type YouView } from '../shared/protocol';
 
 /* ================= identity: table code + player token ================= */
@@ -34,14 +34,11 @@ let conn: 'connecting' | 'open' | 'closed' = 'connecting';
 let turnDeadline = 0;
 let pending: { hand: string; seq: number } | null = null;
 let joinPref = -1, joinShownOnce = false, renameMode = false;
-let eqOn = false, eqCache = { key: '', val: 0 };
 let standArmed = 0, raiseTo = 0, turnKey = '';
-try { eqOn = localStorage.getItem('holdem.eq') === '1'; } catch { /* private mode */ }
 
 const SU = ['♠︎', '♥︎', '♦︎', '♣︎'];
 const SUN = ['스페이드', '하트', '다이아몬드', '클럽'];
 const STREET: Record<string, string> = { preflop: '프리플롭', flop: '플롭', turn: '턴', river: '리버', showdown: '쇼다운' };
-const pct = (x: number) => Math.round(x * 100) + '%';
 const isRed = (c: number) => sk(c) === 1 || sk(c) === 2;
 
 /* ================= DOM ================= */
@@ -55,7 +52,7 @@ const presetBtns = [...document.querySelectorAll<HTMLButtonElement>('#presets bu
 const boardEls = [...document.querySelectorAll<HTMLElement>('#board .card')];
 const ovJoin = $('#ovJoin'), ovRanks = $('#ovRanks'), nameIn = $<HTMLInputElement>('#nameIn'), joinErr = $('#joinErr');
 const btnJoin = $<HTMLButtonElement>('#btnJoin'), btnAway = $<HTMLButtonElement>('#btnAway'), btnRebuy = $<HTMLButtonElement>('#btnRebuy');
-const btnStand = $<HTMLButtonElement>('#btnStand'), btnRename = $<HTMLButtonElement>('#btnRename'), btnEq = $<HTMLButtonElement>('#btnEq');
+const btnStand = $<HTMLButtonElement>('#btnStand'), btnRename = $<HTMLButtonElement>('#btnRename');
 
 interface SeatEl {
   root: HTMLElement; cards: HTMLElement[]; dot: HTMLElement; nmt: HTMLElement; stk: HTMLElement; hn: HTMLElement;
@@ -346,7 +343,7 @@ function renderControls(ms: number) {
     const key = `${h.id}|${h.seq}`;
     if (turnKey !== key) { turnKey = key; setRaise(z.minTo, ms); } else setRaise(raiseTo, ms);
     info = (z.toCall > 0
-      ? `콜 <b>${fmt(z.toCall)}</b> · 총 팟 <b>${fmt(z.total)}</b> · 필요 승률 <b>${pct(z.toCall / (z.total + z.toCall))}</b>`
+      ? `콜 <b>${fmt(z.toCall)}</b> · 총 팟 <b>${fmt(z.total)}</b>`
       : `체크할 수 있습니다 · 총 팟 <b>${fmt(z.total)}</b>`) + ` · 남은 시간 <b>${tl}</b>`;
   } else if (pending && h && pending.hand === h.id && pending.seq === h.seq) {
     info = '보냈습니다 · 테이블에 반영되기를 기다리는 중입니다';
@@ -375,12 +372,6 @@ function renderControls(ms: number) {
   [rRange, rInput, ...presetBtns].forEach(b => { b.disabled = !(myTurn && canRaise); });
   sizerEl.classList.toggle('off', myTurn && !canRaise);
 
-  if (eqOn && h && h.phase === 'bet' && p && !p.folded && YOU.cards) {
-    const nOpp = Math.max(1, liveIdx(h).length - 1);
-    const key = YOU.cards.join(',') + '|' + h.board.join(',') + '|' + nOpp;
-    if (eqCache.key !== key) eqCache = { key, val: equity(YOU.cards, h.board, nOpp, 2500) };
-    info += ` · 내 승률 약 <b class="eq">${pct(eqCache.val)}</b>`;
-  }
   infoEl.innerHTML = info;
 }
 
@@ -526,12 +517,6 @@ $('#btnCopy').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(location.href); toast('링크를 복사했습니다 · 보내면 누구나 이 테이블에 들어올 수 있습니다'); }
   catch { toast(`이 주소를 보내세요: ${location.href}`); }
 });
-function setEq(v: boolean) {
-  eqOn = v; btnEq.setAttribute('aria-pressed', String(v));
-  try { localStorage.setItem('holdem.eq', v ? '1' : '0'); } catch { /* */ }
-  render();
-}
-btnEq.addEventListener('click', () => setEq(!eqOn));
 
 const RANK_EX: [string, string, string][] = [
   ['로열 플러시', '같은 무늬 A·K·Q·J·10', 'As Ks Qs Js Ts'],
@@ -567,6 +552,5 @@ document.addEventListener('keydown', e => {
 });
 
 document.title = `Hold'em 테이블 · ${CODE}`;
-btnEq.setAttribute('aria-pressed', String(eqOn));
 render();
 connect();
