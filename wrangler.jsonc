@@ -23,7 +23,9 @@
   "durable_objects": {
     "bindings": [{ "name": "TABLES", "class_name": "Table" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Table"] }],
+  "exports": {
+    "Table": { "type": "durable-object", "storage": "sqlite" }
+  },
 
   // Table rules. Change and redeploy; tables pick them up the next time they start.
   "vars": {
