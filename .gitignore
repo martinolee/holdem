@@ -1,0 +1,16 @@
+# 의존성
+node_modules/
+
+# 빌드 결과물 (wrangler가 dev/deploy 전에 다시 만듭니다)
+public/app.js
+public/app.js.map
+
+# wrangler 로컬 상태 (Durable Object 저장소, 캐시)
+.wrangler/
+
+# 로컬 비밀값 — 저장소에 올리지 않습니다
+.dev.vars
+.dev.vars.*
+
+# macOS
+.DS_Store
