@@ -109,13 +109,14 @@ export function handName(score: number): string {
   }
 }
 
-/** Names are typed by anyone with the link: strip control/invisible characters, cap at 12. */
-export function cleanName(s: unknown): string {
+/** Names are typed by anyone with the link: strip control/invisible characters, then cap.
+    Players default to 12; room names pass ROOM_NAME_MAX. */
+export function cleanName(s: unknown, max = 12): string {
   return String(s ?? '')
     .replace(/[\u0000-\u001f\u007f-\u009f­​-‏‪-‮⁠-⁯﻿]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 12);
+    .slice(0, max);
 }
 
 /** 12345 → "12,345" without depending on Intl locale data. */

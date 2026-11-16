@@ -4,20 +4,29 @@
    Same shape as Table: hibernating sockets, auto-answered pings, one alarm. */
 
 import { DurableObject } from 'cloudflare:workers';
+import { cleanName } from '../shared/engine';
 import {
-  PROTOCOL,
-  type LobbyClientMsg, type LobbyServerMsg, type RoomBrief,
+  PROTOCOL, ROOM_NAME_MAX,
+  type ErrCode, type LobbyClientMsg, type LobbyServerMsg, type RoomBrief,
 } from '../shared/protocol';
-import type { PwRecord } from './password';
+import { makePwRecord, validPwShape, type PwRecord } from './password';
 import type { Env } from './worker';
 
 const MAX_LOBBY_SOCKETS = 200;
+const MAX_ROOMS = 30;        // rooms on the server at once
+const MAX_PER_IP = 3;        // rooms one address may hold at once
+const CREATE_PER_MIN = 3;    // rooms one address may create per minute
+const CODE_ABC = 'abcdefghjkmnpqrstuvwxyz23456789';  // no look-alike characters
+const CODE_LEN = 6;
+const CODE_TRIES = 5;
 
 /** What the lobby keeps per room. `pw` never leaves this object. */
 export interface RoomRec {
   code: string;
   name: string;
   pw: PwRecord | null;
+  /** Who created it, for the per-address cap. Never published. */
+  ip: string;
   seated: number;
   /** Connections that passed the password; see §8.4 of the design. */
   online: number;
@@ -35,6 +44,9 @@ interface Attachment {
 export class Lobby extends DurableObject<Env> {
   rooms: Rooms = {};
   private rate = new Map<WebSocket, { n: number; t: number }>();
+  /** Recent creation times per address. In memory only: the window is a minute,
+      and losing it to hibernation costs nothing the room caps do not already hold. */
+  private creates = new Map<string, number[]>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -88,9 +100,63 @@ export class Lobby extends DurableObject<Env> {
         // A tab opened before the last deploy speaks the old shape: tell it to reload.
         if (m.v !== PROTOCOL) return this.send(ws, { t: 'reload' });
         return this.send(ws, { t: 'rooms', rooms: this.brief() });
+      case 'create':
+        return this.create(ws, m);
       default:
         return;
     }
+  }
+
+  /* ---------------- making a room ---------------- */
+
+  private async create(ws: WebSocket, m: Extract<LobbyClientMsg, { t: 'create' }>): Promise<void> {
+    const ip = this.att(ws).ip;
+    const now = Date.now();
+
+    const name = cleanName(m.name, ROOM_NAME_MAX);
+    if (!name) return this.err(ws, 'name', '방 이름을 한 글자 이상 입력해 주세요.');
+
+    // An empty string means "no password", which is not the same as a bad one.
+    const wants = m.password !== undefined && m.password !== null && m.password !== '';
+    if (wants && !validPwShape(m.password)) {
+      return this.err(ws, 'pw_wrong', '비밀번호는 4자에서 32자 사이로 정해 주세요.');
+    }
+
+    const all = Object.values(this.rooms);
+    if (all.length >= MAX_ROOMS) {
+      return this.err(ws, 'cap', '지금은 방이 가득 찼습니다. 잠시 뒤에 다시 시도해 주세요.');
+    }
+    if (all.filter(r => r.ip === ip).length >= MAX_PER_IP) {
+      return this.err(ws, 'cap', `한 번에 가질 수 있는 방은 ${MAX_PER_IP}개까지입니다.`);
+    }
+    const recent = (this.creates.get(ip) ?? []).filter(t => now - t < 60_000);
+    if (recent.length >= CREATE_PER_MIN) {
+      return this.err(ws, 'rate', '방을 너무 빨리 만들고 있습니다. 잠시 뒤에 다시 시도해 주세요.');
+    }
+
+    const pw = wants ? await makePwRecord(m.password as string) : null;
+
+    // The table is initialised first: only a table that accepts the name is listed,
+    // so a code collision never attaches this password to a table already in use.
+    let code = '';
+    for (let i = 0; i < CODE_TRIES && !code; i++) {
+      const c = this.newCode();
+      if (this.rooms[c]) continue;
+      if (await this.env.TABLES.get(this.env.TABLES.idFromName(c)).init(c, name, pw)) code = c;
+    }
+    if (!code) return this.err(ws, 'cap', '방을 만들지 못했습니다. 잠시 뒤에 다시 시도해 주세요.');
+
+    recent.push(now);
+    this.creates.set(ip, recent);
+    this.rooms[code] = { code, name, pw, ip, seated: 0, online: 0, createdAt: now, lastSeated: now };
+    await this.save();
+    this.send(ws, { t: 'created', code });
+    this.publish();
+  }
+
+  newCode(): string {
+    const b = crypto.getRandomValues(new Uint8Array(CODE_LEN));
+    return Array.from(b, x => CODE_ABC[x % CODE_ABC.length]).join('');
   }
 
   /* ---------------- the list ---------------- */
@@ -109,6 +175,14 @@ export class Lobby extends DurableObject<Env> {
 
   private async save(): Promise<void> {
     await this.ctx.storage.put('rooms', this.rooms);
+  }
+
+  private att(ws: WebSocket): Attachment {
+    return (ws.deserializeAttachment() as Attachment | null) ?? { ip: '' };
+  }
+
+  private err(ws: WebSocket, code: ErrCode, msg: string): void {
+    this.send(ws, { t: 'error', code, msg });
   }
 
   private send(ws: WebSocket, m: LobbyServerMsg): void {
