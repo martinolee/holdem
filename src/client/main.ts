@@ -56,6 +56,7 @@ const presetBtns = [...document.querySelectorAll<HTMLButtonElement>('#presets bu
 const boardEls = [...document.querySelectorAll<HTMLElement>('#board .card')];
 const ovJoin = $('#ovJoin'), ovRanks = $('#ovRanks'), nameIn = $<HTMLInputElement>('#nameIn'), joinErr = $('#joinErr');
 const ovPw = $('#ovPw'), ovGone = $('#ovGone'), pwIn = $<HTMLInputElement>('#pwIn'), pwErr = $('#pwErr');
+const ovRules = $('#ovRules');
 const btnJoin = $<HTMLButtonElement>('#btnJoin'), btnAway = $<HTMLButtonElement>('#btnAway'), btnRebuy = $<HTMLButtonElement>('#btnRebuy');
 const btnStand = $<HTMLButtonElement>('#btnStand'), btnRename = $<HTMLButtonElement>('#btnRename');
 
@@ -566,12 +567,29 @@ $('#ranksList').innerHTML = RANK_EX.map(([n, d, cs], i) =>
     cs.split(' ').map(parseCard).map(c => `<span class="card${isRed(c) ? ' red' : ''}" role="img" aria-label="${cardName(c)}">${faceHTML(c)}</span>`).join('')
   }</span></li>`).join('');
 $('#btnRanks').addEventListener('click', () => { ovRanks.hidden = false; $('#closeRanks').focus(); });
+
+// The sheet states the table's own numbers, so it is filled from the live config.
+$('#btnRules').addEventListener('click', () => {
+  if (T) {
+    $('#rSb').textContent = fmt(T.cfg.sb);
+    $('#rBb').textContent = fmt(T.cfg.bb);
+    $('#rTurn').textContent = String(T.cfg.turn);
+    $('#rBuyin').textContent = fmt(T.cfg.buyin);
+  }
+  ovRules.hidden = false;
+  $('#closeRules').focus();
+});
+$('#closeRules').addEventListener('click', () => { ovRules.hidden = true; });
+ovRules.addEventListener('click', e => { if (e.target === ovRules) ovRules.hidden = true; });
 $('#closeRanks').addEventListener('click', () => { ovRanks.hidden = true; });
 ovRanks.addEventListener('click', e => { if (e.target === ovRanks) ovRanks.hidden = true; });
 
 document.addEventListener('keydown', e => {
   if (!CODE) return;  // the lobby screen has no table to act on
-  if (!ovRanks.hidden || !ovJoin.hidden) { if (e.key === 'Escape') { ovRanks.hidden = true; closeJoin(); } return; }
+  if (!ovRanks.hidden || !ovRules.hidden || !ovJoin.hidden) {
+    if (e.key === 'Escape') { ovRanks.hidden = true; ovRules.hidden = true; closeJoin(); }
+    return;
+  }
   if (e.metaKey || e.ctrlKey || e.altKey || e.target === rInput) return;
   const ms = mySeat();
   if (!isMyTurn(ms)) return;
