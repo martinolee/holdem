@@ -11,6 +11,8 @@ let retry = 0;
 let pingTimer = 0;
 let rooms: RoomBrief[] = [];
 let connected = false;
+/** The password just used to create a room, handed to that room's tab. */
+let pendingPw = '';
 
 export function startLobby(): void {
   $('#tableApp').hidden = true;
@@ -25,6 +27,7 @@ export function startLobby(): void {
     const name = $<HTMLInputElement>('#roomIn').value;
     const password = $<HTMLInputElement>('#roomPw').value;
     if (!send({ t: 'create', name, ...(password ? { password } : {}) })) return;
+    pendingPw = password;
     $<HTMLButtonElement>('#newBtn').disabled = true;
   });
 
@@ -71,6 +74,10 @@ function onMsg(m: LobbyServerMsg) {
       render();
       return;
     case 'created':
+      // Whoever set the password should not be asked for it a moment later.
+      if (pendingPw) {
+        try { sessionStorage.setItem('holdem.pw.' + m.code, pendingPw); } catch { /* private mode */ }
+      }
       location.href = '/t/' + m.code;
       return;
     case 'error':

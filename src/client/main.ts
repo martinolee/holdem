@@ -32,6 +32,11 @@ let turnDeadline = 0;
 let pending: { hand: string; seq: number } | null = null;
 let joinPref = -1, joinShownOnce = false, renameMode = false;
 let standArmed = 0, raiseTo = 0, turnKey = '';
+/* The room password lives in sessionStorage, not localStorage: closing the tab
+   should ask again. `dead` stops the reconnect loop once the room is gone. */
+let pw: string | null = null;
+let dead = false;
+try { pw = CODE ? sessionStorage.getItem('holdem.pw.' + CODE) : null; } catch { /* private mode */ }
 
 const SU = ['♠︎', '♥︎', '♦︎', '♣︎'];
 const SUN = ['스페이드', '하트', '다이아몬드', '클럽'];
@@ -48,6 +53,7 @@ const rRange = $<HTMLInputElement>('#rRange'), rInput = $<HTMLInputElement>('#rI
 const presetBtns = [...document.querySelectorAll<HTMLButtonElement>('#presets button')];
 const boardEls = [...document.querySelectorAll<HTMLElement>('#board .card')];
 const ovJoin = $('#ovJoin'), ovRanks = $('#ovRanks'), nameIn = $<HTMLInputElement>('#nameIn'), joinErr = $('#joinErr');
+const ovPw = $('#ovPw'), ovGone = $('#ovGone'), pwIn = $<HTMLInputElement>('#pwIn'), pwErr = $('#pwErr');
 const btnJoin = $<HTMLButtonElement>('#btnJoin'), btnAway = $<HTMLButtonElement>('#btnAway'), btnRebuy = $<HTMLButtonElement>('#btnRebuy');
 const btnStand = $<HTMLButtonElement>('#btnStand'), btnRename = $<HTMLButtonElement>('#btnRename');
 
@@ -111,7 +117,7 @@ function connect() {
   ws = s;
   s.onopen = () => {
     retry = 0; conn = 'open';
-    s.send(JSON.stringify({ t: 'hello', v: PROTOCOL, token: TOKEN } satisfies ClientMsg));
+    s.send(JSON.stringify({ t: 'hello', v: PROTOCOL, token: TOKEN, ...(pw ? { password: pw } : {}) } satisfies ClientMsg));
     clearInterval(pingTimer);
     pingTimer = window.setInterval(() => { if (s.readyState === WebSocket.OPEN) s.send('ping'); }, 25000);
   };
@@ -122,7 +128,7 @@ function connect() {
     onMsg(m);
   };
   s.onclose = () => {
-    if (ws !== s) return;
+    if (ws !== s || dead) return;
     conn = 'closed'; clearInterval(pingTimer); render();
     const d = [800, 1500, 3000, 6000, 12000][Math.min(retry++, 4)];
     setTimeout(connect, d);
@@ -144,10 +150,17 @@ function onMsg(m: ServerMsg) {
     return;
   }
   if (m.t === 'error') {
+    if (m.code === 'no_room') { showGone(); return; }
+    if (m.code === 'pw_required' || m.code === 'pw_wrong' || m.code === 'pw_wait') {
+      if (m.code !== 'pw_required') { pw = null; try { sessionStorage.removeItem('holdem.pw.' + CODE); } catch { /* */ } }
+      showPw(m.code === 'pw_required' ? '' : m.msg, m.code === 'pw_wait');
+      return;
+    }
     if (!ovJoin.hidden) { joinErr.textContent = m.msg; joinErr.hidden = false; }
     else toast(m.msg);
     return;
   }
+  ovPw.hidden = true;   // a state message means the password went through
   T = m.table; YOU = m.you;
   const h = T.hand;
   turnDeadline = h && h.phase === 'bet' && h.toAct >= 0 ? Date.now() + h.turnLeft : 0;
@@ -548,6 +561,41 @@ document.addEventListener('keydown', e => {
   else return;
   e.preventDefault();
 });
+
+/* ================= locked and missing rooms ================= */
+
+function showPw(err: string, waiting: boolean) {
+  ovJoin.hidden = true;
+  ovPw.hidden = false;
+  pwErr.textContent = err;
+  pwErr.hidden = !err;
+  pwIn.disabled = waiting;
+  $<HTMLButtonElement>('#pwBtn').disabled = waiting;
+  if (!waiting) pwIn.focus();
+}
+
+function showGone() {
+  dead = true;
+  try { ws?.close(); } catch { /* already closed */ }
+  ovPw.hidden = true; ovJoin.hidden = true; ovRanks.hidden = true;
+  ovGone.hidden = false;
+}
+
+$<HTMLFormElement>('#pwForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = pwIn.value;
+  if (!v) return;
+  pw = v;
+  try { sessionStorage.setItem('holdem.pw.' + CODE, v); } catch { /* private mode */ }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ t: 'hello', v: PROTOCOL, token: TOKEN, password: v } satisfies ClientMsg));
+  } else {
+    connect();
+  }
+});
+$('#pwBack').addEventListener('click', () => { location.href = '/'; });
+$('#goneBack').addEventListener('click', () => { location.href = '/'; });
+$('#btnLobby').addEventListener('click', () => { location.href = '/'; });
 
 if (CODE) {
   document.title = `Hold'em 테이블 · ${CODE}`;
