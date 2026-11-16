@@ -20,3 +20,7 @@ public/app.js.map
 
 # 설계 문서는 로컬에만 보관합니다
 docs/
+
+# 테스트 산출물
+test-results/
+.vitest/
