@@ -151,6 +151,31 @@ it('은퇴한 방의 코드는 없는 방이 된다', async () => {
   expect(await ra.next()).toMatchObject({ t: 'error', code: 'no_room' });
 });
 
+it('방을 만들면 정리 알람이 걸린다', async () => {
+  await makeRoom('알람 거는 방');
+  const at = await runInDurableObject(theLobby(), async (_inst: any, state) => state.storage.getAlarm());
+  expect(at).not.toBeNull();
+  expect(at!).toBeGreaterThan(Date.now());
+});
+
+it('정리 뒤에도 남은 방이 있으면 알람을 다시 건다', async () => {
+  const { code } = await makeRoom('남는 방');
+  const { code: doomed } = await makeRoom('사라질 방');
+
+  await runInDurableObject(theLobby(), async (inst: any, state) => {
+    const r = inst.rooms[doomed];
+    r.online = 0; r.seated = 0; r.everSeated = true;
+    r.lastSeated = Date.now() - 20 * 60_000;
+    await state.storage.put('rooms', inst.rooms);
+    await inst.alarm();
+  });
+
+  expect(await roomOf(doomed)).toBeUndefined();
+  expect(await roomOf(code)).toBeDefined();
+  const at = await runInDurableObject(theLobby(), async (_inst: any, state) => state.storage.getAlarm());
+  expect(at).not.toBeNull();
+});
+
 it('은퇴한 코드를 다시 쓰면 옛 비밀번호가 통하지 않는다', async () => {
   const { code } = await makeRoom('비밀 방', 'hunter2');
 
