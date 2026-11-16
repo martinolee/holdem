@@ -106,16 +106,22 @@ const closesSoon = (ws: WebSocket) =>
     setTimeout(() => res(false), 2000);
   });
 
-it('대기열이 가득 차면 가장 오래 기다린 연결을 밀어낸다', async () => {
+it('대기열은 상한을 넘지 않고 새 접속은 계속 받는다', async () => {
   const stub = await openRoom('locked-6', 'hunter2');
-  const first = await connect(stub, '/ws/locked-6');
-  const dropped = closesSoon(first);
-  for (let i = 0; i < 9; i++) await connect(stub, '/ws/locked-6');
+  for (let i = 0; i < 10; i++) await connect(stub, '/ws/locked-6');
 
-  // The newcomer is always let in; the queue gives up its oldest instead.
-  const allowed = await stub.fetch('https://x/ws/locked-6', { headers: { Upgrade: 'websocket' } });
-  expect(allowed.status).toBe(101);
-  expect(await dropped).toBe(true);
+  // Five more than the queue holds: every one of them is still let in.
+  for (let i = 0; i < 5; i++) {
+    const res = await stub.fetch('https://x/ws/locked-6', { headers: { Upgrade: 'websocket' } });
+    expect(res.status).toBe(101);
+  }
+  await settle();
+
+  const waiting = await runInDurableObject(stub, async (inst: any) =>
+    inst.ctx.getWebSockets().filter((w: WebSocket) =>
+      w.readyState === WebSocket.READY_STATE_OPEN && !w.deserializeAttachment()?.authed).length);
+
+  expect(waiting).toBeLessThanOrEqual(10);
 });
 
 it('유예가 지난 대기 연결은 새 접속이 올 때 정리된다', async () => {

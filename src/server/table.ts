@@ -128,6 +128,9 @@ export class Table extends DurableObject<Env> {
     // one that has been waiting longest is dropped instead.
     const waiting = this.waitingLive();
     if (waiting.length >= MAX_PRE_AUTH) {
+      // Longest-waiting first. Sockets that arrive in the same millisecond tie, and
+      // the tie is broken arbitrarily — which one goes does not matter, only that
+      // the queue stays bounded and the newcomer is never the one turned away.
       const oldest = waiting.reduce((a, b) => (this.att(a).since <= this.att(b).since ? a : b));
       try { oldest.close(1008, '입장 대기가 밀렸습니다'); } catch { /* already closed */ }
     }
