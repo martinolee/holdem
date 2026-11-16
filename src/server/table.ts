@@ -24,10 +24,17 @@ interface Seat {
   missed: number;
   leaving: boolean;
   lastSeen: number;
+  /** Sat down mid-game and chose to wait for the button to pass. Not dealt in. */
+  waiting?: boolean;
+  /** Sat down mid-game and chose to pay the big blind to come in at once. */
+  postBB?: boolean;
 }
 
 interface P {
   bet: number; total: number; folded: boolean; allIn: boolean; needs: boolean;
+  /** Whether a raise is still open to them. Acting spends it; only a full raise
+      hands it back, which is why a short all-in cannot reopen the betting. */
+  mayRaise: boolean;
   label: string; shown: number[] | null; won: number; win: boolean;
 }
 
@@ -274,8 +281,16 @@ export class Table extends DurableObject<Env> {
         if (seat) { seat.name = name; break; }
         const pref = Number.isInteger(m.seat) && m.seat! >= 0 && m.seat! < NSEAT && !this.s.seats[m.seat!] ? m.seat! : this.s.seats.findIndex(x => !x);
         if (pref < 0) return this.err(ws, 'full', '빈 자리가 없습니다. 자리가 나면 다시 시도해 주세요.');
-        this.s.seats[pref] = { token, name, stack: this.cfg.buyin, buyins: 1, away: false, idle: false, missed: 0, leaving: false, lastSeen: Date.now() };
-        this.log([['b', name], ' 님이 앉았습니다'], 'n');
+        // Joining a game already running: pay a big blind to come in, or wait for
+        // the button. Before the first hand nobody can skip blinds, so no choice.
+        const late = this.s.handNo > 0 && this.s.seats.some((x, j) => !!x && j !== pref);
+        const posts = late && m.entry === 'post';
+        this.s.seats[pref] = {
+          token, name, stack: this.cfg.buyin, buyins: 1, away: false, idle: false,
+          missed: 0, leaving: false, lastSeen: Date.now(),
+          waiting: late && !posts, postBB: posts,
+        };
+        this.log([['b', name], posts ? ' 님이 참가비를 내고 앉았습니다' : late ? ' 님이 앉았습니다 · 버튼이 지나가면 참여합니다' : ' 님이 앉았습니다'], 'n');
         this.maybeStart();
         break;
       }
@@ -418,14 +433,14 @@ export class Table extends DurableObject<Env> {
     return {
       cfg: this.cfg,
       seats: this.s.seats.map(s => s && {
-        name: s.name, stack: s.stack, buyins: s.buyins, away: s.away, idle: s.idle, leaving: s.leaving, online: this.online(s.token),
+        name: s.name, stack: s.stack, buyins: s.buyins, away: s.away, idle: s.idle, leaving: s.leaving, waiting: !!s.waiting, online: this.online(s.token),
       }),
       handNo: this.s.handNo,
       hand: h && {
         id: h.id, no: h.no, dealer: h.dealer, order: h.order, phase: h.phase, street: h.street, board: h.board,
         pot: h.pot, cur: h.cur, minR: h.minR, toAct: h.toAct, seq: h.seq, turnSecs: this.cfg.turn,
         turnLeft: h.phase === 'bet' && h.toAct >= 0 ? Math.max(0, h.turnAt + this.cfg.turn * 1000 - now) : 0,
-        ps: h.ps.map(p => p && { bet: p.bet, total: p.total, folded: p.folded, allIn: p.allIn, label: p.label, shown: p.shown, won: p.won, win: p.win }),
+        ps: h.ps.map(p => p && { bet: p.bet, total: p.total, folded: p.folded, allIn: p.allIn, mayRaise: p.mayRaise, label: p.label, shown: p.shown, won: p.won, win: p.win }),
         hl: h.hl, results: h.results, verdict: h.verdict, runout: h.runout,
       },
       log: this.s.log,
@@ -476,7 +491,7 @@ export class Table extends DurableObject<Env> {
   private present(s: Seat) { return this.online(s.token) || Date.now() - s.lastSeen < RECONNECT_GRACE; }
   private seatOk(i: number) {
     const s = this.s.seats[i];
-    return !!s && s.stack > 0 && !s.away && !s.idle && !s.leaving && this.present(s);
+    return !!s && s.stack > 0 && !s.away && !s.idle && !s.leaving && !s.waiting && this.present(s);
   }
   private chips(i: number, amt: number) {
     const s = this.s.seats[i], p = this.s.hand?.ps[i];
@@ -505,11 +520,30 @@ export class Table extends DurableObject<Env> {
       if (s.leaving) { this.s.seats[i] = null; this.log([['b', s.name], ' 님이 자리에서 일어났습니다'], 'n'); }
       else if (!this.online(s.token) && now - s.lastSeen > SEAT_EXPIRY) { this.s.seats[i] = null; this.log([['b', s.name], ' 님의 연결이 끊겨 자리를 정리했습니다'], 'n'); }
     }
+    // Waiting for the button only makes sense when there is a game to wait for:
+    // two people where one is waiting would otherwise never start.
+    let ready = 0;
+    for (let i = 0; i < NSEAT; i++) if (this.seatOk(i)) ready++;
+    const first = this.s.dealer < 0;
+    if (ready < 2 || first) for (const s of this.s.seats) if (s) s.waiting = false;
+
+    // The button is chosen among those already playing, so a seat released below
+    // lands behind it and reaches the blinds within the next few hands.
+    const dealer = this.nextIn(first ? rnd(NSEAT) : this.s.dealer, i => this.seatOk(i));
+    if (dealer < 0) { this.s.hand = null; return; }
+    if (!first) {
+      for (let k = 1; k <= NSEAT; k++) {
+        const j = (this.s.dealer + k) % NSEAT;
+        const s = this.s.seats[j];
+        if (s) s.waiting = false;
+        if (j === dealer) break;
+      }
+    }
+
     const elig: number[] = [];
     for (let i = 0; i < NSEAT; i++) if (this.seatOk(i)) elig.push(i);
     if (elig.length < 2) { this.s.hand = null; return; }
     const inE = (i: number) => elig.includes(i);
-    const dealer = this.nextIn(this.s.dealer < 0 ? rnd(NSEAT) : this.s.dealer, inE);
     let sbS: number, bbS: number;
     if (elig.length === 2) { sbS = dealer; bbS = this.nextIn(dealer, inE); }
     else { sbS = this.nextIn(dealer, inE); bbS = this.nextIn(sbS, inE); }
@@ -522,7 +556,7 @@ export class Table extends DurableObject<Env> {
     this.s.handNo += 1;
     this.s.dealer = dealer;
     const ps: (P | null)[] = Array(NSEAT).fill(null);
-    for (const i of elig) ps[i] = { bet: 0, total: 0, folded: false, allIn: false, needs: false, label: '', shown: null, won: 0, win: false };
+    for (const i of elig) ps[i] = { bet: 0, total: 0, folded: false, allIn: false, needs: false, mayRaise: false, label: '', shown: null, won: 0, win: false };
     this.s.hand = {
       id: `h${this.s.handNo}-${crypto.randomUUID().slice(0, 8)}`, no: this.s.handNo, dealer, sbS, bbS, order,
       phase: 'bet', street: 'preflop', board: [], deck, holes, dp, pot: 0,
@@ -536,7 +570,19 @@ export class Table extends DurableObject<Env> {
       p.label = p.allIn ? `올인 ${fmt(a)}` : `${t} ${fmt(a)}`;
       this.log([['b', this.nameOf(i)], ` ${t} ${fmt(a)}`], 'n');
     }
-    for (const p of ps) if (p) p.needs = !p.allIn;
+    // Whoever paid to come in puts up a big blind as live money: it stands as
+    // their blind for this hand, so nothing is owed to call when they act.
+    for (const i of elig) {
+      const s = this.s.seats[i]!;
+      if (!s.postBB) continue;
+      s.postBB = false;
+      if (i === sbS || i === bbS) continue;
+      const a = this.chips(i, this.cfg.bb);
+      const p = ps[i]!;
+      p.label = p.allIn ? `올인 ${fmt(a)}` : `참가 ${fmt(a)}`;
+      this.log([['b', this.nameOf(i)], ` 참가 ${fmt(a)}`], 'n');
+    }
+    for (const p of ps) if (p) { p.needs = !p.allIn; p.mayRaise = !p.allIn; }
     this.later('proceed', 420 + order.length * 2 * 85, { last: bbS });
   }
 
@@ -588,7 +634,8 @@ export class Table extends DurableObject<Env> {
     if (type === 'check' && toCall > 0) type = 'call';
     if (type === 'raise') {
       const maxTo = p.bet + s.stack;
-      if (s.stack <= toCall || maxTo <= h.cur) type = toCall > 0 ? 'call' : 'check';
+      // Already acted and nobody made a full raise since: call or fold only.
+      if (!p.mayRaise || s.stack <= toCall || maxTo <= h.cur) type = toCall > 0 ? 'call' : 'check';
       else {
         const minTo = Math.min(maxTo, h.cur === 0 ? this.cfg.bb : h.cur + h.minR);
         to = Math.max(minTo, Math.min(maxTo, Math.round(to)));
@@ -602,13 +649,21 @@ export class Table extends DurableObject<Env> {
       this.chips(i, to - p.bet);
       if (p.bet > prev) {
         const inc = p.bet - prev;
-        if (inc >= h.minR) h.minR = inc;
+        // Short of a full raise — only reachable all-in — so everyone still owes
+        // the difference, but those who already acted do not get to raise again.
+        const full = inc >= h.minR;
+        if (full) h.minR = inc;
         h.cur = p.bet; h.raises += 1;
-        h.ps.forEach((o, j) => { if (o && j !== i && this.isAct(j) && o.bet < h.cur) o.needs = true; });
+        h.ps.forEach((o, j) => {
+          if (!o || j === i || !this.isAct(j) || o.bet >= h.cur) return;
+          o.needs = true;
+          if (full) o.mayRaise = true;
+        });
       }
       p.label = p.allIn ? `올인 ${fmt(p.bet)}` : `${prev === 0 ? '벳' : '레이즈'} ${fmt(p.bet)}`;
     }
     p.needs = false;
+    p.mayRaise = false;
     if (!auto) s.missed = 0;
     this.log([['b', s.name], ' ' + p.label], type === 'fold' ? 'f' : '');
     this.proceed(i);
@@ -633,7 +688,7 @@ export class Table extends DurableObject<Env> {
     h.street = h.street === 'preflop' ? 'flop' : h.street === 'flop' ? 'turn' : 'river';
     this.log([STREET_KO[h.street], ...dealt.map(c => ['c', c] as LogSeg)], 's');
     h.cur = 0; h.minR = this.cfg.bb; h.raises = 0; h.toAct = -1;
-    h.ps.forEach((p, i) => { if (p) { p.needs = this.isAct(i); if (this.isAct(i)) p.label = ''; } });
+    h.ps.forEach((p, i) => { if (p) { p.needs = this.isAct(i); p.mayRaise = this.isAct(i); if (this.isAct(i)) p.label = ''; } });
     this.later('proceed', h.runout ? 1300 : 650 + n * 110, { last: h.dealer });
   }
 

@@ -32,6 +32,8 @@ let turnDeadline = 0;
 let pending: { hand: string; seq: number } | null = null;
 let joinPref = -1, joinShownOnce = false, renameMode = false;
 let standArmed = 0, raiseTo = 0, turnKey = '';
+/** Which entry the player picked when joining a game already under way. */
+let entryChoice: 'post' | 'wait' | undefined;
 /* The room password lives in sessionStorage, not localStorage: closing the tab
    should ask again. `dead` stops the reconnect loop once the room is gone. */
 let pw: string | null = null;
@@ -350,13 +352,18 @@ function renderControls(ms: number) {
   else if (!T) info = '테이블에 연결하는 중입니다';
   else if (myTurn && h) {
     const z = sizing(ms);
-    canRaise = z.stack > z.toCall;
+    // A short all-in leaves the call open but not the raise.
+    canRaise = z.stack > z.toCall && !!p && p.mayRaise;
     $('#bCallLbl').textContent = z.toCall === 0 ? '체크' : z.toCall >= z.stack ? `올인 콜 ${fmt(z.stack)}` : `콜 ${fmt(z.toCall)}`;
     const key = `${h.id}|${h.seq}`;
     if (turnKey !== key) { turnKey = key; setRaise(z.minTo, ms); } else setRaise(raiseTo, ms);
+    // Chips to raise with but no right to: say so, or the locked control looks broken.
+    const shut = z.stack > z.toCall && !!p && !p.mayRaise;
     info = (z.toCall > 0
       ? `콜 <b>${fmt(z.toCall)}</b> · 총 팟 <b>${fmt(z.total)}</b>`
-      : `체크할 수 있습니다 · 총 팟 <b>${fmt(z.total)}</b>`) + ` · 남은 시간 <b>${tl}</b>`;
+      : `체크할 수 있습니다 · 총 팟 <b>${fmt(z.total)}</b>`)
+      + (shut ? ' · 정규 레이즈에 못 미치는 올인이라 레이즈는 닫혔습니다' : '')
+      + ` · 남은 시간 <b>${tl}</b>`;
   } else if (pending && h && pending.hand === h.id && pending.seq === h.seq) {
     info = '보냈습니다 · 테이블에 반영되기를 기다리는 중입니다';
   } else if (h && h.phase === 'over' && h.results) {
@@ -365,6 +372,8 @@ function renderControls(ms: number) {
     info = '관전 중입니다 · 참가하기를 누르거나 빈 자리를 골라 앉으세요';
   } else if (s.stack === 0 && !p) {
     info = `칩을 모두 잃었습니다 · 다시 바이인을 누르면 ${fmt(T.cfg.buyin)}칩으로 계속합니다`;
+  } else if (s.waiting && !p) {
+    info = '버튼이 자리를 지나가면 다음 핸드부터 참여합니다';
   } else if ((s.away || s.idle) && !p) {
     info = '자리 비움 상태입니다 · 복귀를 누르면 다음 핸드부터 참여합니다';
   } else if (!h) {
@@ -462,7 +471,15 @@ function openJoin(pref: number) {
   $('#joinTitle').textContent = renameMode ? '표시할 이름을 바꿉니다' : joinPref >= 0 ? `${joinPref + 1}번 자리에 앉습니다` : '이름을 입력하고 자리에 앉으세요';
   $('#joinBtn').textContent = renameMode ? '저장' : '앉기';
   $('#joinSub').textContent = T ? `바이인 ${fmt(T.cfg.buyin)}칩 · 블라인드 ${fmt(T.cfg.sb)}/${fmt(T.cfg.bb)} · 최대 ${NSEAT}명` : `최대 ${NSEAT}명`;
-  $('#joinNote').textContent = T ? `핸드가 진행 중이면 다음 핸드부터 참여합니다. 차례마다 ${T.cfg.turn}초 안에 행동하지 않으면 자동으로 체크 또는 폴드됩니다.` : '';
+  // Joining a game already running means paying a big blind or waiting for the
+  // button — the same choice a cardroom gives, so nobody plays free hands first.
+  const late = !renameMode && !!T && T.handNo > 0 && T.seats.some(x => !!x);
+  entryChoice = late ? 'post' : undefined;
+  $('#joinEntry').hidden = !late;
+  if (late && T) $('#joinBtn').textContent = `바로 참가 · ${fmt(T.cfg.bb)} 내기`;
+  $('#joinNote').textContent = !T ? ''
+    : late ? `이미 진행 중인 게임입니다. 빅블라인드 ${fmt(T.cfg.bb)}을 내고 다음 핸드부터 바로 들어오거나, 버튼이 자리를 지나갈 때까지 기다렸다 들어올 수 있습니다.`
+    : `차례마다 ${T.cfg.turn}초 안에 행동하지 않으면 자동으로 체크 또는 폴드됩니다.`;
   let nm = renameMode && T ? T.seats[ms]!.name : '';
   if (!nm) { try { nm = localStorage.getItem('holdem.name') || ''; } catch { /* */ } }
   nameIn.value = nm;
@@ -478,9 +495,10 @@ $('#joinForm').addEventListener('submit', e => {
   if (!nm) { joinErr.textContent = '이름을 한 글자 이상 입력하세요.'; joinErr.hidden = false; nameIn.focus(); return; }
   try { localStorage.setItem('holdem.name', nm); } catch { /* */ }
   if (renameMode) { if (send({ t: 'rename', name: nm })) closeJoin(); return; }
-  send({ t: 'sit', name: nm, seat: joinPref >= 0 ? joinPref : undefined });
+  send({ t: 'sit', name: nm, seat: joinPref >= 0 ? joinPref : undefined, entry: entryChoice });
   // the sheet closes when the server confirms the seat; a refusal shows inside it
 });
+$('#joinWait').addEventListener('click', () => { entryChoice = 'wait'; $<HTMLFormElement>('#joinForm').requestSubmit(); });
 $('#watchOnly').addEventListener('click', closeJoin);
 ovJoin.addEventListener('click', e => { if (e.target === ovJoin) closeJoin(); });
 

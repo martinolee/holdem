@@ -4,7 +4,8 @@
 // are told to reload instead of talking past the new server.
 
 // 2: rooms are issued by the lobby and may carry a password.
-export const PROTOCOL = 2;
+// 3: sitting down mid-game picks an entry, and a view says whether a raise is open.
+export const PROTOCOL = 3;
 export const NSEAT = 6;
 export const ROOM_NAME_MAX = 20;
 
@@ -24,7 +25,9 @@ export type ErrCode =
 
 export type ClientMsg =
   | { t: 'hello'; v: number; token: string; password?: string }
-  | { t: 'sit'; name: string; seat?: number }
+  /** `entry` applies only when joining a game already under way: pay a big
+      blind to come in now, or wait for the button to pass. */
+  | { t: 'sit'; name: string; seat?: number; entry?: 'post' | 'wait' }
   | { t: 'act'; hand: string; seq: number; type: ActType; to?: number }
   | { t: 'rename'; name: string }
   | { t: 'away' }
@@ -41,6 +44,8 @@ export interface Cfg { sb: number; bb: number; buyin: number; turn: number }
 export interface SeatView {
   name: string;
   stack: number;
+  /** Seated but waiting for the button to pass before being dealt in. */
+  waiting: boolean;
   buyins: number;
   away: boolean;
   idle: boolean;
@@ -53,6 +58,9 @@ export interface PlayerView {
   total: number;
   folded: boolean;
   allIn: boolean;
+  /** False once they have acted, until a full raise reopens the betting. A
+      short all-in leaves it false: they may call or fold, but not raise. */
+  mayRaise: boolean;
   label: string;
   shown: number[] | null;
   won: number;
