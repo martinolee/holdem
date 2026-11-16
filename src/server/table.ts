@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { best5, catName, cleanName, fmt, handName } from '../shared/engine';
 import {
   NSEAT, PROTOCOL,
-  type ActType, type Cfg, type ClientMsg, type HandView, type LogEntry, type LogSeg,
+  type ActType, type Cfg, type ClientMsg, type ErrCode, type HandView, type LogEntry, type LogSeg,
   type Result, type ServerMsg, type TableView,
 } from '../shared/protocol';
 import type { Env } from './worker';
@@ -248,7 +248,7 @@ export class Table extends DurableObject<Env> {
     await this.commit();
   }
 
-  private err(ws: WebSocket, code: string, msg: string) { this.send(ws, { t: 'error', code, msg }); }
+  private err(ws: WebSocket, code: ErrCode, msg: string) { this.send(ws, { t: 'error', code, msg }); }
   private send(ws: WebSocket, m: ServerMsg) { try { ws.send(JSON.stringify(m)); } catch { /* closed */ } }
 
   /* ---------------- persistence + fan-out ---------------- */

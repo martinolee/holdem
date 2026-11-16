@@ -1,14 +1,29 @@
-// Messages between the browser and a table's Durable Object, over one WebSocket.
+// Messages between the browser and the Durable Objects, over one WebSocket each:
+// a table (/ws/<code>) and the lobby (/lobby/ws).
 // Bump PROTOCOL whenever a message shape changes: tabs opened before a deploy
 // are told to reload instead of talking past the new server.
 
-export const PROTOCOL = 1;
+// 2: rooms are issued by the lobby and may carry a password.
+export const PROTOCOL = 2;
 export const NSEAT = 6;
+export const ROOM_NAME_MAX = 20;
 
 export type ActType = 'fold' | 'check' | 'call' | 'raise';
 
+/** Why a request was refused. The client picks its screen from this, not from the text. */
+export type ErrCode =
+  | 'token'        // the browser's player token is malformed
+  | 'name'         // empty after trimming, or otherwise unusable
+  | 'full'         // no free seat / no free socket
+  | 'no_room'      // that code was never issued, or the room has been retired
+  | 'pw_required'  // the room is locked and no password was sent
+  | 'pw_wrong'     // wrong password, or one outside 4..32 characters
+  | 'pw_wait'      // too many wrong guesses from this address
+  | 'rate'         // creating rooms too quickly
+  | 'cap';         // room limit reached, for the server or for this address
+
 export type ClientMsg =
-  | { t: 'hello'; v: number; token: string }
+  | { t: 'hello'; v: number; token: string; password?: string }
   | { t: 'sit'; name: string; seat?: number }
   | { t: 'act'; hand: string; seq: number; type: ActType; to?: number }
   | { t: 'rename'; name: string }
@@ -87,5 +102,27 @@ export interface YouView {
 
 export type ServerMsg =
   | { t: 'state'; table: TableView; you: YouView }
-  | { t: 'error'; code: string; msg: string }
+  | { t: 'error'; code: ErrCode; msg: string }
+  | { t: 'reload' };
+
+/* ================= lobby ================= */
+
+/** One row of the lobby list. The password salt and hash never appear here. */
+export interface RoomBrief {
+  code: string;
+  name: string;
+  seated: number;
+  /** Connections that have passed the password, so a locked room leaks nothing. */
+  online: number;
+  hasPw: boolean;
+}
+
+export type LobbyClientMsg =
+  | { t: 'hello'; v: number }
+  | { t: 'create'; name: string; password?: string };
+
+export type LobbyServerMsg =
+  | { t: 'rooms'; rooms: RoomBrief[] }
+  | { t: 'created'; code: string }
+  | { t: 'error'; code: ErrCode; msg: string }
   | { t: 'reload' };
