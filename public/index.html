@@ -310,10 +310,25 @@ kbd{font-family:var(--f-num);font-size:10.5px;opacity:.6;border:1px solid curren
   .card.anim-deal,.card.anim-flip,.act.think{animation:none}
   .card,.plate{transition:none}
 }
+
+/* lobby */
+.lobby{padding:4px 0 24px}
+.rooms{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.rooms li{display:flex;align-items:center;gap:14px;padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:14px}
+.rooms .rn{flex:1;min-width:0;font-weight:600;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rooms .lock{flex:none;color:var(--brass);font-size:13px}
+.rooms .who{flex:none;color:var(--ink-2);font-size:13px;font-variant-numeric:tabular-nums}
+.rooms .go{flex:none}
+.lobby-note{margin:18px 2px 0;color:var(--ink-2);font-size:13px;text-align:center}
+.opt{color:var(--ink-2);font-weight:400}
+@media (max-width:560px){
+  .rooms li{gap:10px;padding:12px 13px}
+  .rooms .rn{font-size:14px}
+}
 </style>
 </head>
 <body>
-<div class="app">
+<div class="app" id="tableApp">
   <header class="top">
     <div class="brand">
       <h1>Hold'em</h1>
@@ -385,6 +400,47 @@ kbd{font-family:var(--f-num);font-size:10.5px;opacity:.6;border:1px solid curren
       <ol id="log"></ol>
     </section>
   </aside>
+</div>
+
+<div class="app" id="lobbyApp" hidden>
+  <header class="top">
+    <div class="brand">
+      <h1>Hold'em</h1>
+      <p>열려 있는 방에 들어가거나, 새로 만들어 친구를 부르세요</p>
+    </div>
+    <div class="meta">
+      <span>열린 방<b id="lCount">0</b></span>
+    </div>
+    <div class="tools">
+      <button class="tbtn primary" id="btnNew" type="button">방 만들기</button>
+    </div>
+  </header>
+
+  <section class="lobby" aria-label="대기실">
+    <ul class="rooms" id="rooms"></ul>
+    <p class="lobby-note" id="lobbyNote">대기실에 연결하는 중입니다</p>
+  </section>
+</div>
+
+<div class="overlay" id="ovNew" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="newTitle">
+    <p class="eyebrow">새 방</p>
+    <h2 id="newTitle">방 이름을 정하세요</h2>
+    <p class="sub">대기실에 올라갑니다. 링크를 보내면 목록을 거치지 않고 바로 들어올 수도 있습니다.</p>
+    <form id="newForm" novalidate>
+      <label for="roomIn">방 이름</label>
+      <div class="row">
+        <input id="roomIn" maxlength="20" placeholder="예: 금요일 테이블" required>
+      </div>
+      <label for="roomPw">비밀번호 <span class="opt">(선택)</span></label>
+      <div class="row">
+        <input id="roomPw" type="password" maxlength="32" autocomplete="new-password" placeholder="비워두면 누구나 들어옵니다">
+        <button class="act-btn b-main" id="newBtn" type="submit">만들기</button>
+      </div>
+      <p class="err" id="newErr" hidden></p>
+    </form>
+    <button class="linkbtn" id="newCancel" type="button">취소</button>
+  </div>
 </div>
 
 <div class="overlay" id="ovJoin" hidden>

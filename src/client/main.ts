@@ -1,19 +1,16 @@
 import { RL, rk, sk, evaluate, handName, cleanName, fmt } from '../shared/engine';
+import { startLobby } from './lobby';
 import { PROTOCOL, NSEAT, type ClientMsg, type HandView, type ServerMsg, type TableView, type YouView } from '../shared/protocol';
 
 /* ================= identity: table code + player token ================= */
 
+// Rooms are issued by the lobby now, so an address without a code is the lobby
+// itself rather than an invitation to mint a table.
 const CODE = (() => {
   const m = location.pathname.match(/^\/t\/([a-z0-9]{4,16})\/?$/i);
-  if (m) {
-    const c = m[1].toLowerCase();
-    if (location.pathname !== '/t/' + c) history.replaceState(null, '', '/t/' + c);
-    return c;
-  }
-  // No code in the address: open a fresh table and put its code in the URL to share.
-  const abc = 'abcdefghjkmnpqrstuvwxyz23456789';
-  const c = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => abc[b % abc.length]).join('');
-  history.replaceState(null, '', '/t/' + c);
+  if (!m) return '';
+  const c = m[1].toLowerCase();
+  if (location.pathname !== '/t/' + c) history.replaceState(null, '', '/t/' + c);
   return c;
 })();
 
@@ -540,6 +537,7 @@ $('#closeRanks').addEventListener('click', () => { ovRanks.hidden = true; });
 ovRanks.addEventListener('click', e => { if (e.target === ovRanks) ovRanks.hidden = true; });
 
 document.addEventListener('keydown', e => {
+  if (!CODE) return;  // the lobby screen has no table to act on
   if (!ovRanks.hidden || !ovJoin.hidden) { if (e.key === 'Escape') { ovRanks.hidden = true; closeJoin(); } return; }
   if (e.metaKey || e.ctrlKey || e.altKey || e.target === rInput) return;
   const ms = mySeat();
@@ -551,6 +549,10 @@ document.addEventListener('keydown', e => {
   e.preventDefault();
 });
 
-document.title = `Hold'em 테이블 · ${CODE}`;
-render();
-connect();
+if (CODE) {
+  document.title = `Hold'em 테이블 · ${CODE}`;
+  render();
+  connect();
+} else {
+  startLobby();
+}
