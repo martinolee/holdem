@@ -152,7 +152,9 @@ function onMsg(m: ServerMsg) {
   if (m.t === 'error') {
     if (m.code === 'no_room') { showGone(); return; }
     if (m.code === 'pw_required' || m.code === 'pw_wrong' || m.code === 'pw_wait') {
-      if (m.code !== 'pw_required') { pw = null; try { sessionStorage.removeItem('holdem.pw.' + CODE); } catch { /* */ } }
+      // Only a wrong password is discarded. `pw_wait` is returned before the
+      // password is even checked, so the one we hold may well be the right one.
+      if (m.code === 'pw_wrong') { pw = null; try { sessionStorage.removeItem('holdem.pw.' + CODE); } catch { /* */ } }
       showPw(m.code === 'pw_required' ? '' : m.msg, m.code === 'pw_wait');
       return;
     }
@@ -524,7 +526,7 @@ btnStand.addEventListener('click', () => {
   send({ t: 'leave' });
 });
 $('#btnCopy').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText(location.href); toast('링크를 복사했습니다 · 보내면 누구나 이 테이블에 들어올 수 있습니다'); }
+  try { await navigator.clipboard.writeText(location.href); toast('링크를 복사했습니다 · 이 방 주소입니다'); }
   catch { toast(`이 주소를 보내세요: ${location.href}`); }
 });
 
@@ -585,6 +587,12 @@ $<HTMLFormElement>('#pwForm').addEventListener('submit', e => {
   e.preventDefault();
   const v = pwIn.value;
   if (!v) return;
+  // Checked here so a short typo does not spend one of the five tries.
+  if (v.length < 4) {
+    pwErr.textContent = '비밀번호는 4자 이상입니다.';
+    pwErr.hidden = false;
+    return;
+  }
   pw = v;
   try { sessionStorage.setItem('holdem.pw.' + CODE, v); } catch { /* private mode */ }
   if (ws && ws.readyState === WebSocket.OPEN) {

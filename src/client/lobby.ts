@@ -26,6 +26,7 @@ export function startLobby(): void {
     e.preventDefault();
     const name = $<HTMLInputElement>('#roomIn').value;
     const password = $<HTMLInputElement>('#roomPw').value;
+    if (password && password.length < 4) return showErr('비밀번호는 4자 이상으로 정해 주세요.');
     if (!send({ t: 'create', name, ...(password ? { password } : {}) })) return;
     pendingPw = password;
     $<HTMLButtonElement>('#newBtn').disabled = true;
@@ -115,7 +116,9 @@ function render() {
 
     const who = document.createElement('span');
     who.className = 'who';
-    who.textContent = r.seated ? `${r.seated}명 플레이 중` : '비어 있음';
+    // A seat outlives a disconnect by a few minutes, so `seated` alone would
+    // advertise players in a room everyone has left. `online` is who is actually there.
+    who.textContent = !r.online ? '비어 있음' : r.seated ? `${r.seated}명 플레이 중` : '대기 중';
     li.appendChild(who);
 
     const go = document.createElement('button');

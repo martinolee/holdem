@@ -100,14 +100,29 @@ it('통과 전 소켓은 online에 세지 않는다', async () => {
   expect(last.table.online).toBe(1);
 });
 
-it('통과 전 소켓이 정원을 채워도 유예가 지나면 자리가 난다', async () => {
+const closesSoon = (ws: WebSocket) =>
+  new Promise<boolean>(res => {
+    ws.addEventListener('close', () => res(true));
+    setTimeout(() => res(false), 2000);
+  });
+
+it('대기열이 가득 차면 가장 오래 기다린 연결을 밀어낸다', async () => {
   const stub = await openRoom('locked-6', 'hunter2');
-  for (let i = 0; i < 10; i++) await connect(stub, '/ws/locked-6');
+  const first = await connect(stub, '/ws/locked-6');
+  const dropped = closesSoon(first);
+  for (let i = 0; i < 9; i++) await connect(stub, '/ws/locked-6');
 
-  const refused = await stub.fetch('https://x/ws/locked-6', { headers: { Upgrade: 'websocket' } });
-  expect(refused.status).toBe(503);
+  // The newcomer is always let in; the queue gives up its oldest instead.
+  const allowed = await stub.fetch('https://x/ws/locked-6', { headers: { Upgrade: 'websocket' } });
+  expect(allowed.status).toBe(101);
+  expect(await dropped).toBe(true);
+});
 
-  // Age every waiting socket past the grace period, then try again.
+it('유예가 지난 대기 연결은 새 접속이 올 때 정리된다', async () => {
+  const stub = await openRoom('locked-6b', 'hunter2');
+  const stale = await connect(stub, '/ws/locked-6b');
+  const swept = closesSoon(stale);
+
   await runInDurableObject(stub, async (inst: any) => {
     for (const ws of inst.ctx.getWebSockets()) {
       const a = ws.deserializeAttachment();
@@ -115,8 +130,8 @@ it('통과 전 소켓이 정원을 채워도 유예가 지나면 자리가 난�
     }
   });
 
-  const allowed = await stub.fetch('https://x/ws/locked-6', { headers: { Upgrade: 'websocket' } });
-  expect(allowed.status).toBe(101);
+  await connect(stub, '/ws/locked-6b');
+  expect(await swept).toBe(true);
 });
 
 it('5회 틀리면 같은 주소는 대기 상태가 된다', async () => {

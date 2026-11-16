@@ -54,8 +54,9 @@ interface State {
   code?: string;
   name?: string;
   pw?: PwRecord | null;
-  /** Wrong-password counters, keyed by address: a reconnect must not reset them. */
-  pwFails?: Record<string, { n: number; until: number }>;
+  /** Wrong-password counters, keyed by address: a reconnect must not reset them.
+      `at` is the last failure, so old strikes decay instead of accumulating forever. */
+  pwFails?: Record<string, { n: number; until: number; at: number }>;
   seats: (Seat | null)[];
   handNo: number;
   dealer: number;
@@ -75,6 +76,7 @@ const PRE_AUTH_GRACE_MS = 15_000;
 const PW_FAIL_LIMIT = 5;
 const PW_WAIT_MS = 60_000;
 const PW_WAIT_MAX_MS = 15 * 60_000;
+const PW_FAIL_DECAY_MS = 15 * 60_000;  // strikes forgotten this long after the last one
 
 function rnd(n: number): number { const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] % n; }
 function newDeck(): number[] {
@@ -121,8 +123,14 @@ export class Table extends DurableObject<Env> {
   async fetch(req: Request): Promise<Response> {
     if (req.headers.get('Upgrade') !== 'websocket') return new Response('WebSocket 연결만 받습니다.', { status: 426 });
     if (this.open().length >= MAX_SOCKETS) return new Response('이 테이블은 접속자가 너무 많습니다.', { status: 503 });
-    // Sweeping here is what matters: it frees the queue exactly when someone new needs it.
-    if (this.waitingLive().length >= MAX_PRE_AUTH) return new Response('입장을 기다리는 연결이 너무 많습니다.', { status: 503 });
+    // Never refuse the newcomer: sockets that connect and say nothing would then be
+    // able to shut a room — locked or public — to everybody else. Over the cap, the
+    // one that has been waiting longest is dropped instead.
+    const waiting = this.waitingLive();
+    if (waiting.length >= MAX_PRE_AUTH) {
+      const oldest = waiting.reduce((a, b) => (this.att(a).since <= this.att(b).since ? a : b));
+      try { oldest.close(1008, '입장 대기가 밀렸습니다'); } catch { /* already closed */ }
+    }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
@@ -136,9 +144,9 @@ export class Table extends DurableObject<Env> {
       collision never attaches a new password to a table holding chips. */
   async init(code: string, name: string, pw: PwRecord | null): Promise<boolean> {
     if (this.s.name) return false;
-    this.s.code = code;
-    this.s.name = name;
-    this.s.pw = pw;
+    // Replace rather than merge: a table from before rooms carried names has no
+    // name but may still hold seats and chips, which must not follow a new room in.
+    this.s = { ...fresh(), code, name, pw };
     await this.ctx.storage.put('s', this.s);
     return true;
   }
@@ -172,6 +180,8 @@ export class Table extends DurableObject<Env> {
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
+    // Close it first: otherwise it can still read as OPEN while we recount.
+    try { ws.close(1011, 'error'); } catch { /* already closed */ }
     await this.gone(ws);
   }
 
@@ -226,7 +236,11 @@ export class Table extends DurableObject<Env> {
     if (m.t === 'hello') {
       if (m.v !== PROTOCOL) { this.send(ws, { t: 'reload' }); return; }
       // No name means the lobby never issued this code, or the room has been retired.
-      if (!this.s.name) return this.err(ws, 'no_room', '없는 방입니다. 대기실에서 방을 고르거나 새로 만들어 주세요.');
+      if (!this.s.name) {
+        this.err(ws, 'no_room', '없는 방입니다. 대기실에서 방을 고르거나 새로 만들어 주세요.');
+        try { ws.close(1008, '없는 방입니다'); } catch { /* already closed */ }
+        return;
+      }
       if (!tokenOk(m.token)) { this.send(ws, { t: 'error', code: 'token', msg: '접속 정보가 올바르지 않습니다. 페이지를 새로고침해 주세요.' }); return; }
       const a = this.att(ws);
       if (this.s.pw && !a.authed) {
@@ -323,6 +337,7 @@ export class Table extends DurableObject<Env> {
   private async checkPw(ip: string, password: unknown): Promise<{ code: ErrCode; msg: string } | null> {
     const fails = (this.s.pwFails ??= {});
     const now = Date.now();
+    this.prunePwFails(now);
     const f = fails[ip];
     if (f && f.until > now) return { code: 'pw_wait', msg: '비밀번호를 여러 번 틀렸습니다. 잠시 뒤에 다시 시도해 주세요.' };
     if (password === undefined || password === null) {
@@ -334,9 +349,23 @@ export class Table extends DurableObject<Env> {
     }
     const n = (f?.n ?? 0) + 1;
     const wait = n >= PW_FAIL_LIMIT ? Math.min(PW_WAIT_MS * 2 ** (n - PW_FAIL_LIMIT), PW_WAIT_MAX_MS) : 0;
-    fails[ip] = { n, until: wait ? now + wait : 0 };
+    fails[ip] = { n, until: wait ? now + wait : 0, at: now };
     await this.ctx.storage.put('s', this.s);
     return { code: 'pw_wrong', msg: '비밀번호가 맞지 않습니다.' };
+  }
+
+  /** Drops records whose wait has passed and whose last failure is old enough to
+      forget. Without this the blob grows one entry per address, for good, and a
+      mistake from last week still counts towards the next lockout. */
+  private prunePwFails(now: number): boolean {
+    const fails = this.s.pwFails;
+    if (!fails) return false;
+    let cut = false;
+    for (const [ip, f] of Object.entries(fails)) {
+      if (f.until <= now && now - (f.at ?? 0) > PW_FAIL_DECAY_MS) { delete fails[ip]; cut = true; }
+    }
+    if (cut && !Object.keys(fails).length) delete this.s.pwFails;
+    return cut;
   }
 
   private err(ws: WebSocket, code: ErrCode, msg: string) { this.send(ws, { t: 'error', code, msg }); }
@@ -352,11 +381,13 @@ export class Table extends DurableObject<Env> {
   }
 
   /** The lobby only needs to hear when the numbers it shows actually move. */
-  private reportToLobby(): void {
+  private reportToLobby(except?: WebSocket): void {
     const code = this.s.code;
     if (!code) return;
     const seated = this.s.seats.reduce<number>((n, x) => n + (x ? 1 : 0), 0);
-    const online = this.open().length;
+    // Must match what broadcast() counts: a socket on its way out still reads as
+    // open, and one count too high here sticks, because lastReport suppresses the rest.
+    const online = this.open(except).length;
     const sig = `${seated}|${online}`;
     if (sig === this.lastReport) return;
     this.lastReport = sig;
@@ -366,7 +397,7 @@ export class Table extends DurableObject<Env> {
   }
 
   private broadcast(except?: WebSocket) {
-    this.reportToLobby();
+    this.reportToLobby(except);
     const socks = this.open(except);
     const table = this.tableView(socks.length);
     for (const ws of socks) {
@@ -402,6 +433,8 @@ export class Table extends DurableObject<Env> {
   /* ---------------- timers ---------------- */
 
   async alarm(): Promise<void> {
+    // Runs before the timer check: the spec has the alarm keep pwFails from growing.
+    if (this.prunePwFails(Date.now())) await this.ctx.storage.put('s', this.s);
     const t = this.s.timer;
     if (!t) return;
     if (Date.now() < t.at - 25) { await this.ctx.storage.setAlarm(t.at); return; }

@@ -191,11 +191,20 @@ export class Lobby extends DurableObject<Env> {
       (r.online === 0 && now - r.lastSeated > EMPTY_RETIRE_MS) ||
       (!r.everSeated && now - r.createdAt > NEVER_SEATED_RETIRE_MS));
 
+    let cut = 0;
     for (const r of doomed) {
+      // Wipe the table first. Dropping it from the list while the table survives
+      // would leave a room nobody can see, nobody can sweep, and anyone with the
+      // link can still play in — and its code could never be issued again.
+      try {
+        await this.env.TABLES.get(this.env.TABLES.idFromName(r.code)).retire();
+      } catch {
+        continue;  // leave it listed; the next sweep tries again
+      }
       delete this.rooms[r.code];
-      try { await this.env.TABLES.get(this.env.TABLES.idFromName(r.code)).retire(); } catch { /* gone already */ }
+      cut += 1;
     }
-    if (doomed.length) { await this.save(); this.publish(); }
+    if (cut) { await this.save(); this.publish(); }
     await this.ctx.storage.deleteAlarm();
     await this.scheduleSweep();
   }
