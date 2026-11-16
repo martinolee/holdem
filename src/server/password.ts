@@ -24,6 +24,6 @@ export async function verifyPw(password: string, rec: PwRecord): Promise<boolean
 }
 
 /** Shape only: the room decides whether a password is required at all. */
-export function validPwShape(password: unknown): boolean {
+export function validPwShape(password: unknown): password is string {
   return typeof password === 'string' && password.length >= 4 && password.length <= 32;
 }

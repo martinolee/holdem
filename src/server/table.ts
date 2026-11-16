@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { best5, catName, cleanName, fmt, handName } from '../shared/engine';
+import { validPwShape, verifyPw, type PwRecord } from './password';
 import {
   NSEAT, PROTOCOL,
   type ActType, type Cfg, type ClientMsg, type ErrCode, type HandView, type LogEntry, type LogSeg,
@@ -49,6 +50,12 @@ interface Timer { at: number; kind: 'start' | 'proceed' | 'street' | 'turn' | 'a
 
 interface State {
   v: 1;
+  /** Set by Lobby.init when the room is issued. Absent means there is no such room. */
+  code?: string;
+  name?: string;
+  pw?: PwRecord | null;
+  /** Wrong-password counters, keyed by address: a reconnect must not reset them. */
+  pwFails?: Record<string, { n: number; until: number }>;
   seats: (Seat | null)[];
   handNo: number;
   dealer: number;
@@ -62,7 +69,12 @@ const fresh = (): State => ({ v: 1, seats: Array(NSEAT).fill(null), handNo: 0, d
 const STREET_KO: Record<string, string> = { flop: '플롭', turn: '턴', river: '리버' };
 const RECONNECT_GRACE = 20_000;   // still dealt in for this long after a disconnect
 const SEAT_EXPIRY = 3 * 60_000;   // seat cleared after this long offline, at the next hand
-const MAX_SOCKETS = 60;
+const MAX_SOCKETS = 60;          // connections that have passed the password
+const MAX_PRE_AUTH = 10;         // connections still at the password prompt
+const PRE_AUTH_GRACE_MS = 15_000;
+const PW_FAIL_LIMIT = 5;
+const PW_WAIT_MS = 60_000;
+const PW_WAIT_MAX_MS = 15 * 60_000;
 
 function rnd(n: number): number { const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] % n; }
 function newDeck(): number[] {
@@ -73,7 +85,17 @@ function newDeck(): number[] {
 const num = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : d; };
 const tokenOk = (t: unknown): t is string => typeof t === 'string' && /^[A-Za-z0-9-]{16,64}$/.test(t);
 
-interface Attachment { token: string | null }
+/* A socket is accepted before the password is checked, so every attachment
+   carries whether it got through. Nothing but `error` and `reload` is sent to a
+   connection with `authed: false`, and it counts towards neither the room's
+   headcount nor its seat capacity. */
+interface Attachment {
+  token: string | null;
+  authed: boolean;
+  ip: string;
+  /** When the socket connected, so one that never answers can be swept. */
+  since: number;
+}
 
 export class Table extends DurableObject<Env> {
   s: State = fresh();
@@ -97,11 +119,36 @@ export class Table extends DurableObject<Env> {
   async fetch(req: Request): Promise<Response> {
     if (req.headers.get('Upgrade') !== 'websocket') return new Response('WebSocket 연결만 받습니다.', { status: 426 });
     if (this.open().length >= MAX_SOCKETS) return new Response('이 테이블은 접속자가 너무 많습니다.', { status: 503 });
+    // Sweeping here is what matters: it frees the queue exactly when someone new needs it.
+    if (this.waitingLive().length >= MAX_PRE_AUTH) return new Response('입장을 기다리는 연결이 너무 많습니다.', { status: 503 });
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ token: null } satisfies Attachment);
+    server.serializeAttachment({
+      token: null, authed: false, ip: req.headers.get('CF-Connecting-IP') ?? '', since: Date.now(),
+    } satisfies Attachment);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** Issued by the lobby. Refuses a table that is already in use, so a code
+      collision never attaches a new password to a table holding chips. */
+  async init(code: string, name: string, pw: PwRecord | null): Promise<boolean> {
+    if (this.s.name) return false;
+    this.s.code = code;
+    this.s.name = name;
+    this.s.pw = pw;
+    await this.ctx.storage.put('s', this.s);
+    return true;
+  }
+
+  /** Retiring a room erases it: the code may be issued again with a new password. */
+  async retire(): Promise<void> {
+    this.s = fresh();
+    await this.ctx.storage.deleteAll();
+    await this.ctx.storage.deleteAlarm();
+    for (const ws of this.ctx.getWebSockets()) {
+      try { ws.close(1000, '방이 정리되었습니다'); } catch { /* already closed */ }
+    }
   }
 
   async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
@@ -144,10 +191,24 @@ export class Table extends DurableObject<Env> {
   }
 
   private att(ws: WebSocket): Attachment {
-    return (ws.deserializeAttachment() as Attachment | null) ?? { token: null };
+    return (ws.deserializeAttachment() as Attachment | null) ?? { token: null, authed: false, ip: '', since: 0 };
   }
+  /** Connections past the password. Everything downstream — the headcount, the
+      broadcast, seat expiry, the turn clock, the seat cap — counts only these. */
   private open(except?: WebSocket): WebSocket[] {
-    return this.ctx.getWebSockets().filter(w => w !== except && w.readyState === WebSocket.READY_STATE_OPEN);
+    return this.ctx.getWebSockets().filter(w =>
+      w !== except && w.readyState === WebSocket.READY_STATE_OPEN && this.att(w).authed);
+  }
+  /** Connections still at the prompt, dropping any that never answered in time. */
+  private waitingLive(): WebSocket[] {
+    const cut = Date.now() - PRE_AUTH_GRACE_MS;
+    const live: WebSocket[] = [];
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws.readyState !== WebSocket.READY_STATE_OPEN || this.att(ws).authed) continue;
+      if (this.att(ws).since <= cut) { try { ws.close(1008, '입장 시간이 지났습니다'); } catch { /* closed */ } }
+      else live.push(ws);
+    }
+    return live;
   }
   private online(token: string, except?: WebSocket): boolean {
     return this.open(except).some(w => this.att(w).token === token);
@@ -162,8 +223,15 @@ export class Table extends DurableObject<Env> {
   private async handle(ws: WebSocket, m: ClientMsg) {
     if (m.t === 'hello') {
       if (m.v !== PROTOCOL) { this.send(ws, { t: 'reload' }); return; }
+      // No name means the lobby never issued this code, or the room has been retired.
+      if (!this.s.name) return this.err(ws, 'no_room', '없는 방입니다. 대기실에서 방을 고르거나 새로 만들어 주세요.');
       if (!tokenOk(m.token)) { this.send(ws, { t: 'error', code: 'token', msg: '접속 정보가 올바르지 않습니다. 페이지를 새로고침해 주세요.' }); return; }
-      ws.serializeAttachment({ token: m.token } satisfies Attachment);
+      const a = this.att(ws);
+      if (this.s.pw && !a.authed) {
+        const refused = await this.checkPw(a.ip, m.password);
+        if (refused) return this.err(ws, refused.code, refused.msg);
+      }
+      ws.serializeAttachment({ ...a, token: m.token, authed: true } satisfies Attachment);
       const i = this.seatOf(m.token);
       if (i >= 0) {
         this.s.seats[i]!.lastSeen = Date.now();
@@ -246,6 +314,27 @@ export class Table extends DurableObject<Env> {
       default: return;
     }
     await this.commit();
+  }
+
+  /** Null means let them in. Failures are counted per address and persisted, so
+      reconnecting does not hand an attacker a fresh set of guesses. */
+  private async checkPw(ip: string, password: unknown): Promise<{ code: ErrCode; msg: string } | null> {
+    const fails = (this.s.pwFails ??= {});
+    const now = Date.now();
+    const f = fails[ip];
+    if (f && f.until > now) return { code: 'pw_wait', msg: '비밀번호를 여러 번 틀렸습니다. 잠시 뒤에 다시 시도해 주세요.' };
+    if (password === undefined || password === null) {
+      return { code: 'pw_required', msg: '이 방은 비밀번호가 필요합니다.' };
+    }
+    if (validPwShape(password) && await verifyPw(password, this.s.pw!)) {
+      if (f) { delete fails[ip]; await this.ctx.storage.put('s', this.s); }
+      return null;
+    }
+    const n = (f?.n ?? 0) + 1;
+    const wait = n >= PW_FAIL_LIMIT ? Math.min(PW_WAIT_MS * 2 ** (n - PW_FAIL_LIMIT), PW_WAIT_MAX_MS) : 0;
+    fails[ip] = { n, until: wait ? now + wait : 0 };
+    await this.ctx.storage.put('s', this.s);
+    return { code: 'pw_wrong', msg: '비밀번호가 맞지 않습니다.' };
   }
 
   private err(ws: WebSocket, code: ErrCode, msg: string) { this.send(ws, { t: 'error', code, msg }); }
