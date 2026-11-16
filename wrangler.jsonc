@@ -16,15 +16,20 @@
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/ws/*"]
+    "run_worker_first": ["/ws/*", "/lobby/*"]
   },
 
-  // One Durable Object per table. The free plan requires the SQLite storage backend.
+  // One Durable Object per table, plus one lobby object holding the room list.
+  // The free plan requires the SQLite storage backend.
   "durable_objects": {
-    "bindings": [{ "name": "TABLES", "class_name": "Table" }]
+    "bindings": [
+      { "name": "TABLES", "class_name": "Table" },
+      { "name": "LOBBY", "class_name": "Lobby" }
+    ]
   },
   "exports": {
-    "Table": { "type": "durable-object", "storage": "sqlite" }
+    "Table": { "type": "durable-object", "storage": "sqlite" },
+    "Lobby": { "type": "durable-object", "storage": "sqlite" }
   },
 
   // Table rules. Change and redeploy; tables pick them up the next time they start.
