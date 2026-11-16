@@ -101,6 +101,8 @@ export class Table extends DurableObject<Env> {
   s: State = fresh();
   cfg: Cfg;
   rate = new Map<WebSocket, { n: number; t: number }>();
+  /** Last headcount sent to the lobby, so an unchanged one is not sent again. */
+  lastReport = '';
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -349,7 +351,22 @@ export class Table extends DurableObject<Env> {
     this.broadcast(except);
   }
 
+  /** The lobby only needs to hear when the numbers it shows actually move. */
+  private reportToLobby(): void {
+    const code = this.s.code;
+    if (!code) return;
+    const seated = this.s.seats.reduce<number>((n, x) => n + (x ? 1 : 0), 0);
+    const online = this.open().length;
+    const sig = `${seated}|${online}`;
+    if (sig === this.lastReport) return;
+    this.lastReport = sig;
+    const lobby = this.env.LOBBY.get(this.env.LOBBY.idFromName('lobby'));
+    // Never awaited: a slow lobby must not hold up the hand in progress.
+    this.ctx.waitUntil(lobby.report(code, seated, online).catch(() => { /* lobby busy */ }));
+  }
+
   private broadcast(except?: WebSocket) {
+    this.reportToLobby();
     const socks = this.open(except);
     const table = this.tableView(socks.length);
     for (const ws of socks) {

@@ -19,6 +19,9 @@ const CREATE_PER_MIN = 3;    // rooms one address may create per minute
 const CODE_ABC = 'abcdefghjkmnpqrstuvwxyz23456789';  // no look-alike characters
 const CODE_LEN = 6;
 const CODE_TRIES = 5;
+const SWEEP_MS = 5 * 60_000;                   // how often rooms are checked
+const EMPTY_RETIRE_MS = 15 * 60_000;           // nobody connected, since last played
+const NEVER_SEATED_RETIRE_MS = 30 * 60_000;    // created but nobody ever sat down
 
 /** What the lobby keeps per room. `pw` never leaves this object. */
 export interface RoomRec {
@@ -32,6 +35,8 @@ export interface RoomRec {
   online: number;
   createdAt: number;
   lastSeated: number;
+  /** Separates "waiting for the first player" from "everyone went home". */
+  everSeated: boolean;
 }
 
 type Rooms = Record<string, RoomRec>;
@@ -148,8 +153,11 @@ export class Lobby extends DurableObject<Env> {
 
     recent.push(now);
     this.creates.set(ip, recent);
-    this.rooms[code] = { code, name, pw, ip, seated: 0, online: 0, createdAt: now, lastSeated: now };
+    this.rooms[code] = {
+      code, name, pw, ip, seated: 0, online: 0, createdAt: now, lastSeated: now, everSeated: false,
+    };
     await this.save();
+    await this.scheduleSweep();
     this.send(ws, { t: 'created', code });
     this.publish();
   }
@@ -157,6 +165,46 @@ export class Lobby extends DurableObject<Env> {
   newCode(): string {
     const b = crypto.getRandomValues(new Uint8Array(CODE_LEN));
     return Array.from(b, x => CODE_ABC[x % CODE_ABC.length]).join('');
+  }
+
+  /* ---------------- reports from tables ---------------- */
+
+  /** Called by a table when its headcount actually changes. */
+  async report(code: string, seated: number, online: number): Promise<void> {
+    const r = this.rooms[code];
+    if (!r) return;  // a late report from a room that has already been retired
+    r.seated = seated;
+    r.online = online;
+    if (seated > 0) { r.lastSeated = Date.now(); r.everSeated = true; }
+    await this.save();
+    await this.scheduleSweep();
+    this.publish();
+  }
+
+  /* ---------------- retiring rooms ---------------- */
+
+  /** Retiring is deleting: a room off the list no longer exists, so its code
+      is free and the table behind it is wiped. */
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    const doomed = Object.values(this.rooms).filter(r =>
+      (r.online === 0 && now - r.lastSeated > EMPTY_RETIRE_MS) ||
+      (!r.everSeated && now - r.createdAt > NEVER_SEATED_RETIRE_MS));
+
+    for (const r of doomed) {
+      delete this.rooms[r.code];
+      try { await this.env.TABLES.get(this.env.TABLES.idFromName(r.code)).retire(); } catch { /* gone already */ }
+    }
+    if (doomed.length) { await this.save(); this.publish(); }
+    await this.ctx.storage.deleteAlarm();
+    await this.scheduleSweep();
+  }
+
+  private async scheduleSweep(): Promise<void> {
+    if (!Object.keys(this.rooms).length) return;
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
+    }
   }
 
   /* ---------------- the list ---------------- */
